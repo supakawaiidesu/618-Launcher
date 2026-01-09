@@ -22,3 +22,7 @@ Thumbs.db
 
 # User data (for development)
 /data/
+
+# Ai Tools
+CLAUDE.md
+AGENTS.md

@@ -38,7 +38,7 @@ fn main() -> iced::Result {
 
     tracing::info!("Starting {}", APP_NAME);
 
-    iced::application(App::default, App::update, App::view)
+    iced::application(App::new, App::update, App::view)
         .title(APP_NAME)
         .subscription(App::subscription)
         .theme(App::theme)

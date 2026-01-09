@@ -1,4 +1,4 @@
-use crate::data::{CategoryId, Game, GameId, GameSource};
+use crate::data::{CategoryId, Config, Game, GameId, GameSource, Library};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -22,7 +22,8 @@ pub enum Message {
     // Import
     StartImport(GameSource),
     ImportProgress(ImportProgress),
-    ImportComplete(Result<Vec<Game>, String>),
+    ImportComplete(Result<(Vec<Game>, GameSource), String>),
+    ClearLibrary,
 
     // Settings
     ThemeChanged(String),
@@ -54,7 +55,7 @@ pub enum Message {
     SaveLibrary,
     LibrarySaved(Result<(), String>),
     LoadLibrary,
-    LibraryLoaded(Result<(), String>),
+    LibraryLoaded(Library, Config),
 
     // Misc
     Tick,

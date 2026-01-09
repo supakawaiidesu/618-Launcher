@@ -8,8 +8,19 @@ use crate::constants::{
     APP_APPLICATION, APP_ORGANIZATION, APP_QUALIFIER, CONFIG_FILE, LIBRARY_FILE,
 };
 use crate::data::{Category, CategoryId, Config, Game, GameId, GameSource, Library};
+use crate::import::{GameImporter, SteamImporter};
 use crate::message::{Message, SortOrder, View, ViewMode};
 use crate::theme::CustomTheme;
+
+/// Import status for UI feedback
+#[derive(Debug, Clone, Default)]
+pub enum ImportStatus {
+    #[default]
+    Idle,
+    Importing(GameSource),
+    Complete { count: usize, source: GameSource },
+    Error(String),
+}
 
 /// Main application state
 pub struct App {
@@ -27,6 +38,9 @@ pub struct App {
     selected_game: Option<GameId>,
     sort_order: SortOrder,
     view_mode: ViewMode,
+
+    // Import state
+    import_status: ImportStatus,
 
     // Form state for adding games
     new_game_name: String,
@@ -56,6 +70,7 @@ impl Default for App {
             selected_game: None,
             sort_order: SortOrder::NameAsc,
             view_mode: ViewMode::Grid,
+            import_status: ImportStatus::Idle,
             new_game_name: String::new(),
             new_game_path: String::new(),
             data_dir,
@@ -292,38 +307,77 @@ impl App {
                         let config = Config::load_or_create(&config_path).await;
                         (library, config)
                     },
-                    |_| Message::LibraryLoaded(Ok(())),
+                    |(library, config)| Message::LibraryLoaded(library, config),
                 )
             }
 
-            Message::LibraryLoaded(result) => {
-                // This is a simplified handler - in a real impl we'd pass the loaded data
-                tracing::info!("Library load completed: {:?}", result);
+            Message::LibraryLoaded(library, config) => {
+                let game_count = library.game_count();
+                self.library = library;
+                self.config = config;
+                tracing::info!("Library loaded with {} games", game_count);
                 Task::none()
             }
 
-            // Import (placeholder)
+            // Import
             Message::StartImport(source) => {
                 tracing::info!("Starting import from {:?}", source);
-                // TODO: Implement import
-                Task::none()
+                self.import_status = ImportStatus::Importing(source);
+
+                Task::perform(
+                    async move {
+                        match source {
+                            GameSource::Steam => {
+                                let importer = SteamImporter::new();
+                                if !importer.is_available() {
+                                    return Err("Steam is not installed".to_string());
+                                }
+                                match importer.scan_games() {
+                                    Ok(detected) => {
+                                        let games: Vec<Game> = detected
+                                            .into_iter()
+                                            .map(|d| d.into_game(GameSource::Steam))
+                                            .collect();
+                                        Ok((games, source))
+                                    }
+                                    Err(e) => Err(e.to_string()),
+                                }
+                            }
+                            _ => Err(format!("{:?} import not yet implemented", source)),
+                        }
+                    },
+                    |result| match result {
+                        Ok((games, source)) => Message::ImportComplete(Ok((games, source))),
+                        Err(e) => Message::ImportComplete(Err(e)),
+                    },
+                )
             }
 
             Message::ImportProgress(_progress) => Task::none(),
 
             Message::ImportComplete(result) => {
                 match result {
-                    Ok(games) => {
+                    Ok((games, source)) => {
+                        let count = games.len();
                         for game in games {
                             self.library.add_game(game);
                         }
+                        self.import_status = ImportStatus::Complete { count, source };
                         self.save_library()
                     }
                     Err(e) => {
                         tracing::error!("Import failed: {}", e);
+                        self.import_status = ImportStatus::Error(e);
                         Task::none()
                     }
                 }
+            }
+
+            Message::ClearLibrary => {
+                tracing::info!("Clearing library");
+                self.library = Library::new();
+                self.import_status = ImportStatus::Idle;
+                self.save_library()
             }
 
             // Misc
@@ -612,21 +666,68 @@ impl App {
         let back_btn = button(text("Back"))
             .on_press(Message::NavigateTo(View::Library));
 
+        // Status display
+        let status_text: Element<'_, Message> = match &self.import_status {
+            ImportStatus::Idle => text("Select a source to import games from:").into(),
+            ImportStatus::Importing(source) => {
+                text(format!("Importing from {}...", source.label()))
+                    .style(|theme: &Theme| text::Style {
+                        color: Some(theme.palette().primary),
+                    })
+                    .into()
+            }
+            ImportStatus::Complete { count, source } => {
+                text(format!("Imported {} games from {}", count, source.label()))
+                    .style(|theme: &Theme| text::Style {
+                        color: Some(theme.palette().success),
+                    })
+                    .into()
+            }
+            ImportStatus::Error(e) => {
+                text(format!("Error: {}", e))
+                    .style(|theme: &Theme| text::Style {
+                        color: Some(theme.palette().danger),
+                    })
+                    .into()
+            }
+        };
+
+        // Disable buttons while importing
+        let is_importing = matches!(self.import_status, ImportStatus::Importing(_));
+
         let steam_btn = button(text("Import from Steam"))
-            .on_press(Message::StartImport(GameSource::Steam));
+            .on_press_maybe(if is_importing { None } else { Some(Message::StartImport(GameSource::Steam)) });
 
         let epic_btn = button(text("Import from Epic Games"))
-            .on_press(Message::StartImport(GameSource::Epic));
+            .on_press_maybe(if is_importing { None } else { Some(Message::StartImport(GameSource::Epic)) });
 
         let gog_btn = button(text("Import from GOG Galaxy"))
-            .on_press(Message::StartImport(GameSource::GOG));
+            .on_press_maybe(if is_importing { None } else { Some(Message::StartImport(GameSource::GOG)) });
+
+        // Library stats and clear button
+        let game_count = self.library.game_count();
+        let stats_row = row![
+            text(format!("Games in library: {}", game_count)),
+            Space::new().width(Length::Fill),
+            button(text("Clear All Games"))
+                .on_press_maybe(if game_count > 0 && !is_importing {
+                    Some(Message::ClearLibrary)
+                } else {
+                    None
+                })
+                .style(button::danger),
+        ]
+        .spacing(10)
+        .align_y(iced::Alignment::Center);
 
         column![
             row![back_btn, title].spacing(20),
-            text("Select a source to import games from:"),
+            status_text,
             steam_btn,
             epic_btn,
             gog_btn,
+            Space::new().height(20),
+            stats_row,
         ]
         .spacing(15)
         .padding(20)
